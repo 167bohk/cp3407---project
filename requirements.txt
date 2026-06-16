@@ -10,5 +10,5 @@ openai
 xgboost
 transformers
 torch
+torchvision
 psutil
-

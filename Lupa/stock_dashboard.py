@@ -306,6 +306,16 @@ def get_supabase_config():
     return {"url": url.rstrip("/"), "key": key}
 
 
+def clean_json_value(value):
+    if isinstance(value, dict):
+        return {key: clean_json_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [clean_json_value(item) for item in value]
+    if isinstance(value, float) and not np.isfinite(value):
+        return None
+    return value
+
+
 def supabase_request(method, path, payload=None):
     config = get_supabase_config()
     if config is None:
@@ -319,7 +329,7 @@ def supabase_request(method, path, payload=None):
             "Authorization": f'Bearer {config["key"]}',
             "Content-Type": "application/json",
         },
-        data=None if payload is None else json.dumps(payload).encode("utf-8"),
+        data=None if payload is None else json.dumps(clean_json_value(payload), allow_nan=False).encode("utf-8"),
     )
     with urlopen(request, timeout=15) as response:
         body = response.read().decode("utf-8")
@@ -837,6 +847,10 @@ def load_price_data(symbol, period):
 
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
+
+    df = df.dropna(subset=["Close"])
+    if df.empty:
+        return df
 
     df["MA20"] = df["Close"].rolling(20).mean()
 
