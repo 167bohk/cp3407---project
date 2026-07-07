@@ -54,12 +54,12 @@ def render_signal_card(forecast_result):
     )
 
 
-def render_news_tab(symbol, news_items, scored_news, theme):
+def render_news_tab(symbol, news_items, scored_news, theme, news_limit):
     st.subheader(f"{symbol} News")
 
     scored_lookup = {item["headline"]: item for item in scored_news}
 
-    for news_item in news_items[:10]:
+    for news_item in news_items[:news_limit]:
         headline = news_item.get("headline", "No title")
         url = news_item.get("url", "#")
         summary = news_item.get("summary", "")

@@ -65,6 +65,11 @@ US_MARKET_TZ = ZoneInfo("America/New_York")
 FINBERT_MIN_AVAILABLE_MB = 900
 MARKET_CLOSE_STABILIZATION_HOURS = 2
 MAX_DYNAMIC_BLEND_AGE_DAYS = 30
+MIN_BLEND_WEIGHT = 0.2
+MAX_BLEND_WEIGHT = 0.8
+NEWS_HEADLINE_LIMIT = 10
+TECHNICAL_SENTIMENT_WEIGHT = 0.7
+NEWS_SENTIMENT_WEIGHT = 0.3
 PREDICTION_LOG_PATH = os.path.join(os.path.dirname(__file__), "llm_prediction_log.csv")
 PREDICTION_LOG_COLUMNS = [
     "ticker",
@@ -260,6 +265,40 @@ def normalize_download_history(df, ticker):
     return df
 
 
+def download_ticker_history_safe(ticker, period=None, start=None, end=None):
+    download_kwargs = {
+        "progress": False,
+        "auto_adjust": False,
+    }
+    history_kwargs = {"auto_adjust": False}
+
+    if period is not None:
+        download_kwargs["period"] = period
+        history_kwargs["period"] = period
+    else:
+        download_kwargs["start"] = start
+        download_kwargs["end"] = end
+        history_kwargs["start"] = start
+        history_kwargs["end"] = end
+
+    try:
+        df = yf.download(ticker, **download_kwargs)
+    except YFRateLimitError:
+        raise
+    except Exception:
+        df = pd.DataFrame()
+
+    if not df.empty:
+        return df
+
+    try:
+        return yf.Ticker(ticker).history(**history_kwargs)
+    except YFRateLimitError:
+        raise
+    except Exception:
+        return pd.DataFrame()
+
+
 def fetch_actual_close_map_for_ticker(ticker, target_dates):
     if not target_dates:
         return {}
@@ -272,19 +311,9 @@ def fetch_actual_close_map_for_ticker(ticker, target_dates):
     end = (max(parsed_dates) + timedelta(days=3)).strftime("%Y-%m-%d")
 
     try:
-        df = yf.download(ticker, start=start, end=end, progress=False, auto_adjust=False)
+        df = download_ticker_history_safe(ticker, start=start, end=end)
     except YFRateLimitError:
         return {}
-    except Exception:
-        df = pd.DataFrame()
-
-    if df.empty:
-        try:
-            df = yf.Ticker(ticker).history(start=start, end=end, auto_adjust=False)
-        except YFRateLimitError:
-            return {}
-        except Exception:
-            return {}
 
     df = normalize_download_history(df, ticker)
     if df.empty:
@@ -295,10 +324,6 @@ def fetch_actual_close_map_for_ticker(ticker, target_dates):
         close_map[pd.Timestamp(ts).date().isoformat()] = float(row["Close"])
 
     return close_map
-
-
-def fetch_actual_close_for_target_date(ticker, target_date_str):
-    return fetch_actual_close_map_for_ticker(ticker, [target_date_str]).get(target_date_str)
 
 
 def update_actual_closes_in_log():
@@ -358,7 +383,7 @@ def update_actual_closes_in_log():
 
 
 def get_dynamic_blend_weights(ticker, fallback_llm_weight, min_samples=5, window=10):
-    fallback_llm_weight = min(max(float(fallback_llm_weight), 0.2), 0.8)
+    fallback_llm_weight = min(max(float(fallback_llm_weight), MIN_BLEND_WEIGHT), MAX_BLEND_WEIGHT)
     fallback_xgb_weight = 1 - fallback_llm_weight
     default_result = {
         "weight_xgb": fallback_xgb_weight,
@@ -413,7 +438,7 @@ def get_dynamic_blend_weights(ticker, fallback_llm_weight, min_samples=5, window
     weight_xgb = raw_xgb / total
     weight_llm = raw_llm / total
 
-    weight_xgb = max(0.2, min(0.8, weight_xgb))
+    weight_xgb = max(MIN_BLEND_WEIGHT, min(MAX_BLEND_WEIGHT, weight_xgb))
     weight_llm = 1 - weight_xgb
 
     return {
@@ -509,25 +534,6 @@ def get_next_trading_day(base_date):
     return next_day
 
 
-def get_next_market_open(reference_time):
-    candidate_date = reference_time.date()
-
-    if not is_us_trading_day(candidate_date.strftime("%Y-%m-%d")):
-        while not is_us_trading_day(candidate_date.strftime("%Y-%m-%d")):
-            candidate_date += timedelta(days=1)
-    elif reference_time.time() >= datetime.min.replace(hour=16).time():
-        candidate_date = get_next_trading_day(candidate_date)
-
-    return datetime(
-        candidate_date.year,
-        candidate_date.month,
-        candidate_date.day,
-        9,
-        30,
-        tzinfo=US_MARKET_TZ,
-    )
-
-
 def format_time_delta(delta):
     total_seconds = max(int(delta.total_seconds()), 0)
     hours, remainder = divmod(total_seconds, 3600)
@@ -620,16 +626,10 @@ def has_enough_memory_for_finbert(min_available_mb=FINBERT_MIN_AVAILABLE_MB):
 
 @st.cache_data(ttl=180)
 def download_single_ticker_history(symbol, period):
-    df = yf.download(symbol, period=period, progress=False, auto_adjust=False)
-
-    if not df.empty:
-        return df
-
     try:
-        fallback_df = yf.Ticker(symbol).history(period=period, auto_adjust=False)
-        return fallback_df
-    except Exception:
-        return df
+        return download_ticker_history_safe(symbol, period=period)
+    except YFRateLimitError:
+        return pd.DataFrame()
 
 
 @st.cache_data(ttl=900)
@@ -1006,7 +1006,7 @@ def parse_llm_response(llm_text, fallback_price):
 
 
 def build_forecast_result(ticker, current_price, pred_price, llm_price, llm_conf, llm_reason, target_context):
-    llm_conf = min(max(llm_conf, 0.2), 0.8)
+    llm_conf = min(max(llm_conf, MIN_BLEND_WEIGHT), MAX_BLEND_WEIGHT)
     blend_info = get_dynamic_blend_weights(ticker, llm_conf)
     weight_xgb = blend_info["weight_xgb"]
     weight_llm = blend_info["weight_llm"]
@@ -1079,7 +1079,7 @@ if df.empty:
 
 news = get_news(symbol)
 almanac = get_almanac_signals()
-headline_list = [item.get("headline", "") for item in news[:10] if item.get("headline")]
+headline_list = [item.get("headline", "") for item in news[:NEWS_HEADLINE_LIMIT] if item.get("headline")]
 scored_news = score_news_with_finbert(headline_list)
 
 price = df["Close"].iloc[-1]
@@ -1087,7 +1087,10 @@ ret = df["Returns"].iloc[-1]
 trend = "Bullish" if price > df["MA20"].iloc[-1] else "Bearish"
 technical_sentiment = calculate_technical_sentiment(df)
 news_sentiment = aggregate_news_sentiment(scored_news)
-sentiment = 0.7 * technical_sentiment + 0.3 * news_sentiment
+sentiment = (
+    TECHNICAL_SENTIMENT_WEIGHT * technical_sentiment
+    + NEWS_SENTIMENT_WEIGHT * news_sentiment
+)
 pred_price = price_forecast(df)
 target_context = get_prediction_target_context(df.index[-1])
 
@@ -1266,7 +1269,7 @@ with tab_heat:
         st.info("Heatmap data is temporarily unavailable.")
 
 with tab_news:
-    render_news_tab(symbol, news, scored_news, theme)
+    render_news_tab(symbol, news, scored_news, theme, news_limit=NEWS_HEADLINE_LIMIT)
 
 with tab_almanac:
     render_almanac_tab(almanac)
