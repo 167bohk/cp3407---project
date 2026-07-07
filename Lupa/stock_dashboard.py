@@ -1,6 +1,5 @@
 import json
 import os
-import base64
 from datetime import datetime, timedelta
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -10,13 +9,20 @@ from zoneinfo import ZoneInfo
 import finnhub
 import numpy as np
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
 from openai import OpenAI
-from plotly.subplots import make_subplots
 from xgboost import XGBRegressor
+
+from charts import build_heatmap_chart, build_price_chart, build_sentiment_gauge
+from theme import apply_theme, get_theme
+from ui_components import (
+    render_almanac_tab,
+    render_app_header,
+    render_news_tab,
+    render_signal_card,
+    render_value_card,
+)
 
 try:
     import torch
@@ -80,195 +86,11 @@ PREDICTION_LOG_COLUMNS = [
 ]
 
 
-# ---------- Theme: light/dark colors and global CSS ----------
+# ---------- DataFrame factories ----------
 
 
 def empty_prediction_log_df():
     return pd.DataFrame(columns=PREDICTION_LOG_COLUMNS)
-
-def get_theme(is_dark_mode):
-    if is_dark_mode:
-        return {
-            "bg_style": (
-                "radial-gradient(circle at 50% 30%, rgba(255,255,255,0.05), transparent 60%), "
-                "radial-gradient(circle at center, #1e293b 0%, #020617 100%)"
-            ),
-            "sidebar_bg": "#020617",
-            "text_color": "#ffffff",
-            "muted_text_color": "#cbd5e1",
-            "metric_bg": "rgba(255,255,255,0.05)",
-            "card_bg": "rgba(255,255,255,0.06)",
-            "card_border": "1px solid rgba(255,255,255,0.10)",
-            "input_bg": "#0f172a",
-            "input_border": "1px solid rgba(255,255,255,0.12)",
-            "dropdown_bg": "#0f172a",
-            "dropdown_hover_bg": "#1e293b",
-            "dropdown_selected_bg": "#273449",
-            "plotly_template": "plotly_dark",
-            "grid_color": "rgba(255,255,255,0.10)",
-        }
-
-    return {
-        "bg_style": (
-            "radial-gradient(circle at 50% 30%, rgba(0,0,0,0.12), transparent 55%), "
-            "radial-gradient(circle at center, #ffffff 0%, #cbd5e1 100%)"
-        ),
-        "sidebar_bg": "#ffffff",
-        "text_color": "#000000",
-        "muted_text_color": "#334155",
-        "metric_bg": "#ffffff",
-        "card_bg": "rgba(255,255,255,0.92)",
-        "card_border": "1px solid rgba(15,23,42,0.08)",
-        "input_bg": "#ffffff",
-        "input_border": "1px solid rgba(15,23,42,0.16)",
-        "dropdown_bg": "#ffffff",
-        "dropdown_hover_bg": "#f1f5f9",
-        "dropdown_selected_bg": "#e2e8f0",
-        "plotly_template": "plotly_white",
-        "grid_color": "rgba(0,0,0,0.10)",
-    }
-
-
-def apply_theme(theme):
-    st.markdown(
-        f"""
-        <style>
-        [data-testid="stAppViewContainer"] {{
-            background: {theme["bg_style"]} !important;
-        }}
-
-        [data-testid="stSidebar"] {{
-            background-color: {theme["sidebar_bg"]};
-        }}
-
-        .block-container {{
-            padding-top: 2rem;
-        }}
-
-        [data-testid="stMetric"] {{
-            background: {theme["metric_bg"]};
-            padding: 15px;
-            border-radius: 10px;
-        }}
-
-        h1, h2, h3, h4, h5, p, label, span, div {{
-            color: {theme["text_color"]};
-        }}
-
-        [data-testid="stSidebar"] *,
-        [data-testid="stSidebar"] label,
-        [data-testid="stSidebar"] p,
-        [data-testid="stSidebar"] span,
-        [data-testid="stSidebar"] div {{
-            color: {theme["text_color"]} !important;
-        }}
-
-        [data-testid="stMetricValue"] div,
-        button[data-baseweb="tab"] div {{
-            color: {theme["text_color"]} !important;
-        }}
-
-        .stTextInput input,
-        .stSelectbox div[data-baseweb="select"] > div,
-        .stSelectbox input {{
-            background: {theme["input_bg"]} !important;
-            border: {theme["input_border"]} !important;
-            color: {theme["text_color"]} !important;
-            -webkit-text-fill-color: {theme["text_color"]} !important;
-        }}
-
-        [data-testid="stSidebar"] .stTextInput input,
-        [data-testid="stSidebar"] .stSelectbox div[data-baseweb="select"] > div,
-        [data-testid="stSidebar"] .stSelectbox input {{
-            background: {theme["input_bg"]} !important;
-            color: {theme["text_color"]} !important;
-            -webkit-text-fill-color: {theme["text_color"]} !important;
-        }}
-
-        div[data-baseweb="popover"] ul {{
-            background: {theme["dropdown_bg"]} !important;
-            border: {theme["input_border"]} !important;
-        }}
-
-        div[data-baseweb="popover"] li {{
-            background: {theme["dropdown_bg"]} !important;
-            color: {theme["text_color"]} !important;
-        }}
-
-        div[data-baseweb="popover"] li:hover {{
-            background: {theme["dropdown_hover_bg"]} !important;
-        }}
-
-        div[data-baseweb="popover"] li[aria-selected="true"] {{
-            background: {theme["dropdown_selected_bg"]} !important;
-            color: {theme["text_color"]} !important;
-        }}
-
-        .stButton > button p {{
-            color: white !important;
-            font-weight: 700 !important;
-        }}
-
-        .themed-card {{
-            background: {theme["card_bg"]};
-            border: {theme["card_border"]};
-            border-radius: 15px;
-        }}
-
-        .signal-card {{
-            background: {theme["card_bg"]};
-            border: {theme["card_border"]};
-            border-radius: 15px;
-            text-align: center;
-        }}
-
-        .signal-card-title {{
-            margin: 0;
-            font-size: 2rem;
-            font-weight: 700;
-            line-height: 1.2;
-        }}
-
-        .signal-card-meta {{
-            margin-top: 10px;
-            font-size: 1rem;
-            color: {theme["text_color"]};
-        }}
-
-        .signal-buy {{
-            color: #22c55e !important;
-        }}
-
-        .signal-sell {{
-            color: #ef4444 !important;
-        }}
-
-        .app-header {{
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 18px;
-            margin: 0 0 24px 0;
-        }}
-
-        .app-header-logo {{
-            width: 86px;
-            height: 86px;
-            object-fit: contain;
-            display: block;
-        }}
-
-        .app-header-title {{
-            margin: 0;
-            font-size: 3.2rem;
-            font-weight: 800;
-            line-height: 1;
-            color: {theme["text_color"]};
-        }}
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
 
 
 # ---------- Session State: initialize and reset derived forecast output ----------
@@ -786,21 +608,6 @@ def clamp(value, lower, upper):
     return max(lower, min(upper, value))
 
 
-def render_app_header(logo_path, title, theme):
-    with open(logo_path, "rb") as image_file:
-        encoded_logo = base64.b64encode(image_file.read()).decode("utf-8")
-
-    st.markdown(
-        f"""
-        <div class="app-header">
-            <img class="app-header-logo" src="data:image/png;base64,{encoded_logo}" alt="Lupa logo">
-            <h1 class="app-header-title">{title}</h1>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
 def has_enough_memory_for_finbert(min_available_mb=FINBERT_MIN_AVAILABLE_MB):
     if psutil is None:
         return True
@@ -1225,217 +1032,7 @@ def build_forecast_result(ticker, current_price, pred_price, llm_price, llm_conf
     }
 
 
-# ---------- Charts: reusable Plotly figures for dashboard sections ----------
-
-def build_sentiment_gauge(sentiment, theme):
-    fig = go.Figure(
-        go.Indicator(
-            mode="gauge+number",
-            value=sentiment,
-            domain={"x": [0, 1], "y": [0, 1]},
-            title={"text": "Market Sentiment", "font": {"color": theme["text_color"]}},
-            gauge={
-                "axis": {
-                    "range": [0, 100],
-                    "tickcolor": theme["text_color"],
-                    "tickfont": {"color": theme["text_color"]},
-                },
-                "bar": {"color": "#3b82f6"},
-                "steps": [
-                    {"range": [0, 40], "color": "#ef4444"},
-                    {"range": [40, 60], "color": "#facc15"},
-                    {"range": [60, 100], "color": "#22c55e"},
-                ],
-            },
-        )
-    )
-    fig.update_layout(
-        template=theme["plotly_template"],
-        autosize=False,
-        width=760,
-        height=420,
-        margin={"l": 40, "r": 40, "t": 60, "b": 20},
-        paper_bgcolor="rgba(0,0,0,0)",
-        font={"color": theme["text_color"]},
-    )
-    fig.update_traces(number={"font": {"color": theme["text_color"]}})
-    return fig
-
-
-def build_price_chart(df, theme):
-    fig = make_subplots(
-        rows=2,
-        cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.03,
-        row_heights=[0.75, 0.25],
-    )
-
-    fig.add_trace(
-        go.Candlestick(
-            x=df.index,
-            open=df["Open"],
-            high=df["High"],
-            low=df["Low"],
-            close=df["Close"],
-            name="Price",
-            increasing_line_color="#22c55e",
-            decreasing_line_color="#ef4444",
-        ),
-        row=1,
-        col=1,
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=df.index,
-            y=df["MA20"],
-            line=dict(color="#60a5fa", width=2),
-            name="MA20",
-        ),
-        row=1,
-        col=1,
-    )
-    fig.add_trace(
-        go.Bar(
-            x=df.index,
-            y=df["Volume"],
-            name="Volume",
-            marker_color="rgba(120,160,255,0.3)",
-        ),
-        row=2,
-        col=1,
-    )
-
-    fig.update_layout(
-        height=650,
-        hovermode="x unified",
-        dragmode="pan",
-        template=theme["plotly_template"],
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        font={"color": theme["text_color"]},
-        legend=dict(
-            bgcolor=theme["card_bg"],
-            bordercolor=theme["grid_color"],
-            borderwidth=1,
-            font={"color": theme["text_color"]},
-        ),
-        xaxis=dict(rangeslider=dict(visible=True), type="date"),
-    )
-    fig.update_xaxes(tickfont=dict(color=theme["text_color"]), gridcolor=theme["grid_color"])
-    fig.update_yaxes(tickfont=dict(color=theme["text_color"]), gridcolor=theme["grid_color"])
-    return fig
-
-
-def build_heatmap_chart(heatmap_df, theme):
-    fig = px.bar(
-        heatmap_df,
-        x="Ticker",
-        y="Change",
-        color="Change",
-        text="Change",
-        color_continuous_scale="RdYlGn",
-    )
-    fig.update_traces(texttemplate="%{text:.2f}%", textposition="outside")
-    fig.update_layout(
-        height=450,
-        template=theme["plotly_template"],
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        font={"color": theme["text_color"]},
-    )
-    fig.update_xaxes(tickfont=dict(color=theme["text_color"]))
-    fig.update_yaxes(tickfont=dict(color=theme["text_color"]))
-    return fig
-
-
-# ---------- UI Helpers: repeated cards and tab-specific render blocks ----------
-
-def render_value_card(title, value, signal_text, signal_color, theme, extra_text=None):
-    st.markdown(
-        f"""
-        <div class="themed-card" style="padding: 20px; margin-top: 10px;">
-            <p style="color:{theme["muted_text_color"]};">{title}</p>
-            <h2>${value:.2f}</h2>
-            <span style="color:{signal_color}; font-weight:600;">{signal_text}</span>
-            {f'<p style="color:{theme["muted_text_color"]}; margin-top: 10px;">{extra_text}</p>' if extra_text else ""}
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def render_prediction_card(pred_price, current_price, theme):
-    signal_text, signal_color = get_signal_style(pred_price, current_price)
-    st.markdown(
-        f"""
-        <div class="themed-card" style="padding: 20px;">
-            <p style="color:{theme["muted_text_color"]};">Predicted Price</p>
-            <h2>${pred_price:.2f}</h2>
-            <span style="color:{signal_color}; font-weight:600;">{signal_text}</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def render_signal_card(forecast_result):
-    signal_class = "signal-buy" if forecast_result["signal_text"] == "BUY" else "signal-sell"
-    arrow = "\u2191" if forecast_result["signal_text"] == "BUY" else "\u2193"
-    reference_close_date = forecast_result.get("reference_close_date", "last completed")
-    predicted_label = forecast_result.get("predicted_label", "")
-
-    st.markdown(
-        f"""
-        <div class="signal-card" style="padding: 25px; margin-bottom: 10px;">
-            <div class="signal-card-title {signal_class}">{arrow} {forecast_result["signal_text"]}</div>
-            <div class="signal-card-meta">
-                Forecast for {forecast_result["predicted_date"]} |
-                {forecast_result["predicted_change_pct"]:+.2f}% vs {reference_close_date} close
-            </div>
-            <div class="signal-card-meta">{predicted_label}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def render_news_tab(symbol, news_items, scored_news, theme):
-    st.subheader(f"{symbol} News")
-
-    scored_lookup = {item["headline"]: item for item in scored_news}
-
-    for news_item in news_items[:10]:
-        headline = news_item.get("headline", "No title")
-        url = news_item.get("url", "#")
-        summary = news_item.get("summary", "")
-        date = datetime.fromtimestamp(news_item.get("datetime", 0)).strftime("%Y-%m-%d")
-        st.markdown(f"**[{headline}]({url})**")
-        if headline in scored_lookup:
-            sentiment = scored_lookup[headline]
-            st.caption(
-                f'FinBERT: {sentiment["label"].title()} | compound {sentiment["compound"]:+.2f}'
-            )
-        st.markdown(
-            f'<div style="color:{theme["text_color"]}; white-space: pre-wrap;">{summary}</div>',
-            unsafe_allow_html=True,
-        )
-        st.caption(date)
-        st.divider()
-
-
-def render_almanac_tab(almanac):
-    st.header("Market Seasonality (Stock Trader's Almanac)")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("January Barometer", almanac["jan_signal"])
-    with col2:
-        st.metric("First Five Days", almanac["five_signal"])
-    with col3:
-        st.metric("Best Six Months", almanac["best6"])
-    st.subheader("Presidential Cycle")
-    st.info(almanac["pres"])
-
+# ---------- Tab data helpers ----------
 
 def load_heatmap_data():
     batch_data = download_multi_ticker_history(tuple(BIG_TECHS), "5d")
@@ -1466,7 +1063,7 @@ theme = get_theme(dark_mode)
 apply_theme(theme)
 
 logo_path = os.path.join(os.path.dirname(__file__), "logo.png")
-render_app_header(logo_path, "Lupa AI Stock Terminal", theme)
+render_app_header(logo_path, "Lupa AI Stock Terminal")
 
 st.sidebar.text_input("Ticker", key="ticker", on_change=on_ticker_changed)
 st.sidebar.radio("Big Tech", BIG_TECHS, key="bigtech", index=None, on_change=on_bigtech_changed)
@@ -1553,7 +1150,8 @@ with tab_ai:
 
     with left_col:
         st.subheader("XGBoost Prediction")
-        render_prediction_card(pred_price, price, theme)
+        signal_text, signal_color = get_signal_style(pred_price, price)
+        render_value_card("Predicted Price", pred_price, signal_text, signal_color, theme)
 
     llm_prompt = build_llm_prompt(
         symbol,
