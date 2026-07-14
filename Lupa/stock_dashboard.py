@@ -622,6 +622,17 @@ def is_finbert_enabled():
     return str(configured_value).lower() in {"1", "true", "yes", "on"}
 
 
+def configure_huggingface_token():
+    try:
+        hf_token = st.secrets.get("HF_TOKEN")
+    except Exception:
+        hf_token = None
+
+    if hf_token:
+        os.environ["HF_TOKEN"] = str(hf_token)
+        os.environ["HUGGING_FACE_HUB_TOKEN"] = str(hf_token)
+
+
 # ---------- Data Layer: market history, news, and seasonality inputs ----------
 
 @st.cache_data(ttl=180)
@@ -747,6 +758,8 @@ def get_almanac_signals():
 def load_finbert():
     if not is_finbert_enabled():
         return None, None
+
+    configure_huggingface_token()
 
     if torch is None or AutoTokenizer is None or AutoModelForSequenceClassification is None:
         return None, None
