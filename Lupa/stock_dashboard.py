@@ -53,6 +53,7 @@ PERIOD_OPTIONS = ["3mo", "6mo", "1y", "2y", "5y"]
 FORECAST_STATE_KEY = "forecast_result"
 US_MARKET_TZ = ZoneInfo("America/New_York")
 FINBERT_MIN_AVAILABLE_MB = 900
+ENABLE_FINBERT_DEFAULT = False
 MARKET_CLOSE_STABILIZATION_HOURS = 2
 MAX_DYNAMIC_BLEND_AGE_DAYS = 30
 MIN_BLEND_WEIGHT = 0.2
@@ -612,6 +613,15 @@ def has_enough_memory_for_finbert(min_available_mb=FINBERT_MIN_AVAILABLE_MB):
     return available_mb >= min_available_mb
 
 
+def is_finbert_enabled():
+    try:
+        configured_value = st.secrets.get("ENABLE_FINBERT", os.getenv("ENABLE_FINBERT", ENABLE_FINBERT_DEFAULT))
+    except Exception:
+        configured_value = os.getenv("ENABLE_FINBERT", ENABLE_FINBERT_DEFAULT)
+
+    return str(configured_value).lower() in {"1", "true", "yes", "on"}
+
+
 # ---------- Data Layer: market history, news, and seasonality inputs ----------
 
 @st.cache_data(ttl=180)
@@ -735,6 +745,9 @@ def get_almanac_signals():
 
 @st.cache_resource
 def load_finbert():
+    if not is_finbert_enabled():
+        return None, None
+
     if torch is None or AutoTokenizer is None or AutoModelForSequenceClassification is None:
         return None, None
 
