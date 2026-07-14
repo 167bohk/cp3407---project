@@ -45,18 +45,8 @@ except ImportError:
 
 # ---------- App Setup: page metadata, API clients, shared constants ----------
 
-st.set_page_config(
-    page_title="Lupa AI Stock Terminal",
-    layout="wide",
-    page_icon="📈",
-    initial_sidebar_state="expanded",
-)
-
-FINNHUB_API_KEY = st.secrets["FINNHUB_API_KEY"]
-OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
-
-finnhub_client = finnhub.Client(api_key=FINNHUB_API_KEY)
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
+finnhub_client = None
+openai_client = None
 
 BIG_TECHS = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "TSLA", "GOOGL", "AMD"]
 PERIOD_OPTIONS = ["3mo", "6mo", "1y", "2y", "5y"]
@@ -655,7 +645,7 @@ def load_price_data(symbol, period):
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
-    df = df.dropna(subset=["Close"])
+    df = df.dropna(subset=["Close"]).copy()
     if df.empty:
         return df
 
@@ -1056,220 +1046,237 @@ def load_heatmap_data():
 
 # ---------- Main Page: assemble sidebar, load data, and render dashboard ----------
 
-initialize_session_state()
+def main():
+    global finnhub_client, openai_client
 
-dark_mode = st.sidebar.toggle("Night Mode", value=True)
-theme = get_theme(dark_mode)
-apply_theme(theme)
-
-logo_path = os.path.join(os.path.dirname(__file__), "logo.png")
-render_app_header(logo_path, "Lupa AI Stock Terminal")
-
-st.sidebar.text_input("Ticker", key="ticker", on_change=on_ticker_changed)
-st.sidebar.radio("Big Tech", BIG_TECHS, key="bigtech", index=None, on_change=on_bigtech_changed)
-period = st.sidebar.selectbox("Analysis Window", PERIOD_OPTIONS, index=2)
-
-symbol = st.session_state.ticker.upper()
-raw_df = load_price_data(symbol, period)
-df = keep_completed_market_data(raw_df)
-
-if df.empty:
-    st.error("Ticker not found or latest completed close is not available yet")
-    st.stop()
-
-news = get_news(symbol)
-almanac = get_almanac_signals()
-headline_list = [item.get("headline", "") for item in news[:NEWS_HEADLINE_LIMIT] if item.get("headline")]
-scored_news = score_news_with_finbert(headline_list)
-
-price = df["Close"].iloc[-1]
-ret = df["Returns"].iloc[-1]
-trend = "Bullish" if price > df["MA20"].iloc[-1] else "Bearish"
-technical_sentiment = calculate_technical_sentiment(df)
-news_sentiment = aggregate_news_sentiment(scored_news)
-sentiment = (
-    TECHNICAL_SENTIMENT_WEIGHT * technical_sentiment
-    + NEWS_SENTIMENT_WEIGHT * news_sentiment
-)
-pred_price = price_forecast(df)
-target_context = get_prediction_target_context(df.index[-1])
-
-news_sentiment_summary = build_news_sentiment_summary(scored_news)
-news_summary = build_prompt_news_summary(news, scored_news)
-
-st.markdown(f"## {symbol} Market Overview")
-
-metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
-with metric_col1:
-    st.metric("Price", f"${price:.2f}", f"{ret:.2%}")
-with metric_col2:
-    st.metric("Trend", trend)
-with metric_col3:
-    st.metric("Volatility", f"{df['Volatility'].iloc[-1]:.2%}")
-with metric_col4:
-    st.metric("RSI", f"{df['RSI'].iloc[-1]:.1f}")
-
-_, sentiment_center, _ = st.columns([1, 2, 1])
-with sentiment_center:
-    st.plotly_chart(build_sentiment_gauge(sentiment, theme), width="content")
-    with st.expander("How Market Sentiment Is Calculated"):
-        st.markdown(
-            f"""
-            `Market Sentiment` is a composite 0-100 score:
-
-            - `70%` Technical sentiment
-            - `30%` FinBERT news sentiment
-
-            Current breakdown:
-
-            - Technical sentiment: `{technical_sentiment:.1f}`
-            - News sentiment: `{news_sentiment:.1f}`
-            - Final score: `{sentiment:.1f}`
-
-            Technical sentiment is derived from:
-            - Price vs `MA20`
-            - `RSI`
-            - `MACD` vs signal line
-            - 5-day return
-            - Volume momentum
-
-            News sentiment is derived from recent headlines scored by `FinBERT`.
-            """
-        )
-
-tab_chart, tab_ai, tab_almanac, tab_heat, tab_news = st.tabs(
-    ["Chart", "AI Forecast", "Almanac", "Heatmap", "News"]
-)
-
-with tab_chart:
-    st.plotly_chart(
-        build_price_chart(df, theme),
-        width="stretch",
-        config={"scrollZoom": True},
+    st.set_page_config(
+        page_title="Lupa AI Stock Terminal",
+        layout="wide",
+        page_icon=":chart_with_upwards_trend:",
+        initial_sidebar_state="expanded",
     )
 
-with tab_ai:
-    left_col, right_col = st.columns(2)
+    finnhub_client = finnhub.Client(api_key=st.secrets["FINNHUB_API_KEY"])
+    openai_client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-    with left_col:
-        st.subheader("XGBoost Prediction")
-        signal_text, signal_color = get_signal_style(pred_price, price)
-        render_value_card("Predicted Price", pred_price, signal_text, signal_color, theme)
+    initialize_session_state()
 
-    llm_prompt = build_llm_prompt(
-        symbol,
-        price,
-        trend,
-        df,
-        news_summary,
-        news_sentiment_summary,
-        almanac,
-        target_context,
+    dark_mode = st.sidebar.toggle("Night Mode", value=True)
+    theme = get_theme(dark_mode)
+    apply_theme(theme)
+
+    logo_path = os.path.join(os.path.dirname(__file__), "logo.png")
+    render_app_header(logo_path, "Lupa AI Stock Terminal")
+
+    st.sidebar.text_input("Ticker", key="ticker", on_change=on_ticker_changed)
+    st.sidebar.radio("Big Tech", BIG_TECHS, key="bigtech", index=None, on_change=on_bigtech_changed)
+    period = st.sidebar.selectbox("Analysis Window", PERIOD_OPTIONS, index=2)
+
+    symbol = st.session_state.ticker.upper()
+    raw_df = load_price_data(symbol, period)
+    df = keep_completed_market_data(raw_df)
+
+    if df.empty:
+        st.error("Ticker not found or latest completed close is not available yet")
+        st.stop()
+
+    news = get_news(symbol)
+    almanac = get_almanac_signals()
+    headline_list = [item.get("headline", "") for item in news[:NEWS_HEADLINE_LIMIT] if item.get("headline")]
+    scored_news = score_news_with_finbert(headline_list)
+
+    price = df["Close"].iloc[-1]
+    ret = df["Returns"].iloc[-1]
+    trend = "Bullish" if price > df["MA20"].iloc[-1] else "Bearish"
+    technical_sentiment = calculate_technical_sentiment(df)
+    news_sentiment = aggregate_news_sentiment(scored_news)
+    sentiment = (
+        TECHNICAL_SENTIMENT_WEIGHT * technical_sentiment
+        + NEWS_SENTIMENT_WEIGHT * news_sentiment
     )
-    run_llm_clicked = False
+    pred_price = price_forecast(df)
+    target_context = get_prediction_target_context(df.index[-1])
 
-    with right_col:
-        st.markdown('<div style="height: 150px;"></div>', unsafe_allow_html=True)
-        _, button_col, _ = st.columns([1, 2, 1])
-        with button_col:
-            run_llm_clicked = st.button(
-                "Run LLM Analysis",
-                key="llm_button",
-                width="stretch",
+    news_sentiment_summary = build_news_sentiment_summary(scored_news)
+    news_summary = build_prompt_news_summary(news, scored_news)
+
+    st.markdown(f"## {symbol} Market Overview")
+
+    metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+    with metric_col1:
+        st.metric("Price", f"${price:.2f}", f"{ret:.2%}")
+    with metric_col2:
+        st.metric("Trend", trend)
+    with metric_col3:
+        st.metric("Volatility", f"{df['Volatility'].iloc[-1]:.2%}")
+    with metric_col4:
+        st.metric("RSI", f"{df['RSI'].iloc[-1]:.1f}")
+
+    _, sentiment_center, _ = st.columns([1, 2, 1])
+    with sentiment_center:
+        st.plotly_chart(build_sentiment_gauge(sentiment, theme), width="content")
+        with st.expander("How Market Sentiment Is Calculated"):
+            st.markdown(
+                f"""
+                `Market Sentiment` is a composite 0-100 score:
+
+                - `70%` Technical sentiment
+                - `30%` FinBERT news sentiment
+
+                Current breakdown:
+
+                - Technical sentiment: `{technical_sentiment:.1f}`
+                - News sentiment: `{news_sentiment:.1f}`
+                - Final score: `{sentiment:.1f}`
+
+                Technical sentiment is derived from:
+                - Price vs `MA20`
+                - `RSI`
+                - `MACD` vs signal line
+                - 5-day return
+                - Volume momentum
+
+                News sentiment is derived from recent headlines scored by `FinBERT`.
+                """
             )
 
-    if run_llm_clicked:
-        try:
-            update_actual_closes_in_log()
-        except YFRateLimitError:
-            pass
-        llm_text = run_llm(llm_prompt)
-        llm_price, llm_conf, llm_reason, llm_parse_error = parse_llm_response(llm_text, price)
+    tab_chart, tab_ai, tab_almanac, tab_heat, tab_news = st.tabs(
+        ["Chart", "AI Forecast", "Almanac", "Heatmap", "News"]
+    )
 
-        if llm_parse_error is not None:
-            st.error("LLM parsing failed")
-            st.write(llm_parse_error)
-
-        st.session_state[FORECAST_STATE_KEY] = build_forecast_result(
-            ticker=symbol,
-            current_price=price,
-            pred_price=pred_price,
-            llm_price=llm_price,
-            llm_conf=llm_conf,
-            llm_reason=llm_reason,
-            target_context=target_context,
-        )
-        record_status, record_error = append_prediction_log_record(
-            ticker=symbol,
-            reference_close_price=price,
-            forecast_result=st.session_state[FORECAST_STATE_KEY],
-        )
-        if record_status == "supabase":
-            st.caption("Prediction logged to Supabase for dynamic weighting.")
-        elif record_status == "csv":
-            st.caption("Prediction logged locally for dynamic weighting.")
-            if record_error:
-                st.caption(record_error)
-        else:
-            st.caption("Prediction for this ticker and target date is already logged.")
-
-    forecast_result = st.session_state.get(FORECAST_STATE_KEY)
-    if forecast_result:
-        forecast_result.setdefault("reference_close_date", "last completed")
-        forecast_result.setdefault("predicted_label", "")
-        st.markdown("### LLM Analysis")
-        st.markdown(
-            f"""
-            <div class="themed-card" style="
-                padding: 15px;
-                border-radius: 10px;
-                font-size: 15px;
-                line-height: 1.6;
-                margin-bottom: 10px;
-            ">
-                {forecast_result["llm_reason"]}
-            </div>
-            """,
-            unsafe_allow_html=True,
+    with tab_chart:
+        st.plotly_chart(
+            build_price_chart(df, theme),
+            width="stretch",
+            config={"scrollZoom": True},
         )
 
-        render_signal_card(forecast_result)
+    with tab_ai:
+        left_col, right_col = st.columns(2)
 
-        for title, value in [
-            ("Ensemble Price", forecast_result["ensemble_price"]),
-            ("LLM Price", forecast_result["llm_price"]),
-            ("XGBoost Price", forecast_result["pred_price"]),
-        ]:
-            signal_text, signal_color = get_signal_style(value, price)
-            extra_text = None
-            if title == "Ensemble Price":
-                blend_label = "Dynamic blend" if forecast_result.get("weight_source") == "dynamic" else "Default blend"
-                extra_text = (
-                    f'{blend_label}: XGBoost {forecast_result["weight_xgb"]:.0%} '
-                    f'+ LLM {forecast_result["weight_llm"]:.0%}'
+        with left_col:
+            st.subheader("XGBoost Prediction")
+            signal_text, signal_color = get_signal_style(pred_price, price)
+            render_value_card("Predicted Price", pred_price, signal_text, signal_color, theme)
+
+        llm_prompt = build_llm_prompt(
+            symbol,
+            price,
+            trend,
+            df,
+            news_summary,
+            news_sentiment_summary,
+            almanac,
+            target_context,
+        )
+        run_llm_clicked = False
+
+        with right_col:
+            st.markdown('<div style="height: 150px;"></div>', unsafe_allow_html=True)
+            _, button_col, _ = st.columns([1, 2, 1])
+            with button_col:
+                run_llm_clicked = st.button(
+                    "Run LLM Analysis",
+                    key="llm_button",
+                    width="stretch",
                 )
-                if forecast_result.get("weight_source") == "dynamic":
-                    extra_text += f' | based on {forecast_result.get("weight_sample_count", 0)} completed runs'
-                else:
-                    extra_text += f' | waiting for {max(0, 5 - forecast_result.get("weight_sample_count", 0))} more completed runs'
-                if forecast_result.get("mae_xgb") is not None and forecast_result.get("mae_llm") is not None:
-                    extra_text += (
-                        f' | XGB MAE: ${forecast_result["mae_xgb"]:.2f}'
-                        f' | LLM MAE: ${forecast_result["mae_llm"]:.2f}'
+
+        if run_llm_clicked:
+            try:
+                update_actual_closes_in_log()
+            except YFRateLimitError:
+                pass
+            llm_text = run_llm(llm_prompt)
+            llm_price, llm_conf, llm_reason, llm_parse_error = parse_llm_response(llm_text, price)
+
+            if llm_parse_error is not None:
+                st.error("LLM parsing failed")
+                st.write(llm_parse_error)
+
+            st.session_state[FORECAST_STATE_KEY] = build_forecast_result(
+                ticker=symbol,
+                current_price=price,
+                pred_price=pred_price,
+                llm_price=llm_price,
+                llm_conf=llm_conf,
+                llm_reason=llm_reason,
+                target_context=target_context,
+            )
+            record_status, record_error = append_prediction_log_record(
+                ticker=symbol,
+                reference_close_price=price,
+                forecast_result=st.session_state[FORECAST_STATE_KEY],
+            )
+            if record_status == "supabase":
+                st.caption("Prediction logged to Supabase for dynamic weighting.")
+            elif record_status == "csv":
+                st.caption("Prediction logged locally for dynamic weighting.")
+                if record_error:
+                    st.caption(record_error)
+            else:
+                st.caption("Prediction for this ticker and target date is already logged.")
+
+        forecast_result = st.session_state.get(FORECAST_STATE_KEY)
+        if forecast_result:
+            forecast_result.setdefault("reference_close_date", "last completed")
+            forecast_result.setdefault("predicted_label", "")
+            st.markdown("### LLM Analysis")
+            st.markdown(
+                f"""
+                <div class="themed-card" style="
+                    padding: 15px;
+                    border-radius: 10px;
+                    font-size: 15px;
+                    line-height: 1.6;
+                    margin-bottom: 10px;
+                ">
+                    {forecast_result["llm_reason"]}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            render_signal_card(forecast_result)
+
+            for title, value in [
+                ("Ensemble Price", forecast_result["ensemble_price"]),
+                ("LLM Price", forecast_result["llm_price"]),
+                ("XGBoost Price", forecast_result["pred_price"]),
+            ]:
+                signal_text, signal_color = get_signal_style(value, price)
+                extra_text = None
+                if title == "Ensemble Price":
+                    blend_label = "Dynamic blend" if forecast_result.get("weight_source") == "dynamic" else "Default blend"
+                    extra_text = (
+                        f'{blend_label}: XGBoost {forecast_result["weight_xgb"]:.0%} '
+                        f'+ LLM {forecast_result["weight_llm"]:.0%}'
                     )
-            if title == "LLM Price":
-                extra_text = f'Confidence: {forecast_result["llm_conf"]:.0%}'
-            render_value_card(title, value, signal_text, signal_color, theme, extra_text=extra_text)
+                    if forecast_result.get("weight_source") == "dynamic":
+                        extra_text += f' | based on {forecast_result.get("weight_sample_count", 0)} completed runs'
+                    else:
+                        extra_text += f' | waiting for {max(0, 5 - forecast_result.get("weight_sample_count", 0))} more completed runs'
+                    if forecast_result.get("mae_xgb") is not None and forecast_result.get("mae_llm") is not None:
+                        extra_text += (
+                            f' | XGB MAE: ${forecast_result["mae_xgb"]:.2f}'
+                            f' | LLM MAE: ${forecast_result["mae_llm"]:.2f}'
+                        )
+                if title == "LLM Price":
+                    extra_text = f'Confidence: {forecast_result["llm_conf"]:.0%}'
+                render_value_card(title, value, signal_text, signal_color, theme, extra_text=extra_text)
 
-with tab_heat:
-    heatmap_df = load_heatmap_data()
-    if not heatmap_df.empty:
-        st.plotly_chart(build_heatmap_chart(heatmap_df, theme), width="stretch")
-    else:
-        st.info("Heatmap data is temporarily unavailable.")
+    with tab_heat:
+        heatmap_df = load_heatmap_data()
+        if not heatmap_df.empty:
+            st.plotly_chart(build_heatmap_chart(heatmap_df, theme), width="stretch")
+        else:
+            st.info("Heatmap data is temporarily unavailable.")
 
-with tab_news:
-    render_news_tab(symbol, news, scored_news, theme, news_limit=NEWS_HEADLINE_LIMIT)
+    with tab_news:
+        render_news_tab(symbol, news, scored_news, theme, news_limit=NEWS_HEADLINE_LIMIT)
 
-with tab_almanac:
-    render_almanac_tab(almanac)
+    with tab_almanac:
+        render_almanac_tab(almanac)
+
+
+if __name__ == "__main__":
+    main()
