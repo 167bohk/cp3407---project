@@ -85,14 +85,6 @@ def apply_theme(theme):
             color: {theme["text_color"]} !important;
         }}
 
-        .sidebar-field-label {{
-            color: {theme["text_color"]};
-            font-size: 0.875rem;
-            font-weight: 400;
-            line-height: 1.25;
-            margin: 0 0 0.5rem 0;
-        }}
-
         .stTextInput input,
         .stSelectbox div[data-baseweb="select"] > div,
         .stSelectbox input {{
