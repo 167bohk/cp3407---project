@@ -99,22 +99,13 @@ def clear_forecast_state():
 
 def initialize_session_state():
     st.session_state.setdefault("ticker", "AAPL")
-    st.session_state.setdefault("bigtech", "AAPL")
+    st.session_state.setdefault("ticker_search", None)
 
 
-def on_ticker_changed():
-    ticker = st.session_state.ticker.upper()
-    st.session_state.ticker = ticker
-    if ticker in BIG_TECHS:
-        st.session_state.bigtech = ticker
-    else:
-        st.session_state.bigtech = None
-    clear_forecast_state()
-
-
-def on_bigtech_changed():
-    if st.session_state.bigtech:
-        st.session_state.ticker = st.session_state.bigtech
+def on_ticker_search_changed():
+    selected_ticker = st.session_state.get("ticker_search")
+    if selected_ticker:
+        st.session_state.ticker = selected_ticker.strip().upper()
     clear_forecast_state()
 
 
@@ -1127,8 +1118,16 @@ def main():
     logo_path = os.path.join(os.path.dirname(__file__), "logo.png")
     render_app_header(logo_path, "Lupa AI Stock Terminal")
 
-    st.sidebar.text_input("Ticker", key="ticker", on_change=on_ticker_changed)
-    st.sidebar.radio("Big Tech", BIG_TECHS, key="bigtech", index=None, on_change=on_bigtech_changed)
+    st.sidebar.selectbox(
+        "Ticker",
+        BIG_TECHS,
+        index=None,
+        key="ticker_search",
+        placeholder="Enter any ticker (e.g. AAPL)",
+        accept_new_options=True,
+        filter_mode="prefix",
+        on_change=on_ticker_search_changed,
+    )
     period = st.sidebar.selectbox("Analysis Window", PERIOD_OPTIONS, index=2)
 
     symbol = st.session_state.ticker.upper()
@@ -1329,7 +1328,7 @@ def main():
             custom_heatmap_tickers = st.text_input(
                 "Custom stocks",
                 key="heatmap_custom_tickers",
-                placeholder="NFLX, JPM, 0700.HK",
+                placeholder="Enter tickers, separated by commas (e.g. NFLX, JPM)",
             )
         with toggle_col:
             include_big_tech = st.toggle("Include Big Tech", value=True)
