@@ -1,3 +1,5 @@
+import csv
+import io
 import json
 import os
 import re
@@ -13,6 +15,7 @@ import pandas as pd
 import streamlit as st
 import yfinance as yf
 from openai import OpenAI
+from streamlit_searchbox import st_searchbox
 from xgboost import XGBRegressor
 
 from charts import build_heatmap_chart, build_price_chart, build_sentiment_gauge
@@ -51,6 +54,11 @@ openai_client = None
 
 BIG_TECHS = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "TSLA", "GOOGL", "AMD"]
 MAX_HEATMAP_TICKERS = 20
+MAX_TICKER_SUGGESTIONS = 50
+US_TICKER_DIRECTORY_SOURCES = (
+    ("https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt", "Symbol"),
+    ("https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt", "ACT Symbol"),
+)
 PERIOD_OPTIONS = ["3mo", "6mo", "1y", "2y", "5y"]
 FORECAST_STATE_KEY = "forecast_result"
 US_MARKET_TZ = ZoneInfo("America/New_York")
@@ -99,14 +107,48 @@ def clear_forecast_state():
 
 def initialize_session_state():
     st.session_state.setdefault("ticker", "AAPL")
-    st.session_state.setdefault("ticker_search", None)
 
 
-def on_ticker_search_changed():
-    selected_ticker = st.session_state.get("ticker_search")
+def on_ticker_selected(selected_ticker):
     if selected_ticker:
         st.session_state.ticker = selected_ticker.strip().upper()
     clear_forecast_state()
+
+
+def parse_us_symbol_directory(content, symbol_field):
+    symbols = []
+    for row in csv.DictReader(io.StringIO(content), delimiter="|"):
+        symbol = (row.get(symbol_field) or "").strip().upper()
+        if not symbol or symbol.startswith("FILE CREATION TIME"):
+            continue
+        if (row.get("Test Issue") or "").strip().upper() == "Y":
+            continue
+        symbols.append(symbol.replace(".", "-"))
+    return symbols
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_us_ticker_directory():
+    symbols = set(BIG_TECHS)
+    for url, symbol_field in US_TICKER_DIRECTORY_SOURCES:
+        try:
+            request = Request(url, headers={"User-Agent": "Lupa-Stock-Terminal/1.0"})
+            with urlopen(request, timeout=12) as response:
+                content = response.read().decode("utf-8", errors="replace")
+            symbols.update(parse_us_symbol_directory(content, symbol_field))
+        except (HTTPError, URLError, TimeoutError, ValueError):
+            continue
+    return tuple(sorted(symbols))
+
+
+def search_us_tickers(searchterm):
+    query = searchterm.strip().upper()
+    if not query:
+        return list(BIG_TECHS)
+    return [
+        symbol for symbol in load_us_ticker_directory()
+        if symbol.startswith(query)
+    ][:MAX_TICKER_SUGGESTIONS]
 
 
 def get_supabase_config():
@@ -1118,16 +1160,35 @@ def main():
     logo_path = os.path.join(os.path.dirname(__file__), "logo.png")
     render_app_header(logo_path, "Lupa AI Stock Terminal")
 
-    st.sidebar.selectbox(
-        "Ticker",
-        BIG_TECHS,
-        index=None,
-        key="ticker_search",
-        placeholder="Enter any ticker (e.g. AAPL)",
-        accept_new_options=True,
-        filter_mode="prefix",
-        on_change=on_ticker_search_changed,
-    )
+    with st.sidebar:
+        st_searchbox(
+            search_us_tickers,
+            label="Ticker",
+            key="ticker_search",
+            placeholder="Enter any ticker (e.g. AAPL)",
+            default_options=BIG_TECHS,
+            edit_after_submit="option",
+            submit_function=on_ticker_selected,
+            debounce=200,
+            style_overrides={
+                "searchbox": {
+                    "control": {
+                        "backgroundColor": theme["input_bg"],
+                        "borderColor": theme["grid_color"],
+                    },
+                    "input": {"color": theme["text_color"]},
+                    "placeholder": {"color": theme["placeholder_color"]},
+                    "singleValue": {"color": theme["text_color"]},
+                    "menu": {"backgroundColor": theme["dropdown_bg"]},
+                    "menuList": {"backgroundColor": theme["dropdown_bg"]},
+                    "option": {
+                        "color": theme["text_color"],
+                        "backgroundColor": theme["dropdown_bg"],
+                        "highlightColor": theme["dropdown_selected_bg"],
+                    },
+                },
+            },
+        )
     period = st.sidebar.selectbox("Analysis Window", PERIOD_OPTIONS, index=2)
 
     symbol = st.session_state.ticker.upper()

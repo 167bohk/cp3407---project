@@ -256,3 +256,31 @@ def test_load_heatmap_data_calculates_changes_for_custom_tickers(monkeypatch):
 
     assert result["Ticker"].tolist() == ["NFLX", "JPM"]
     assert result["Change"].tolist() == [10.0, -5.0]
+
+
+def test_parse_us_symbol_directory_filters_test_symbols_and_normalizes_classes():
+    content = (
+        "Symbol|Security Name|Test Issue\n"
+        "AAPL|Apple Inc.|N\n"
+        "FAKE|Test Security|Y\n"
+        "BRK.B|Berkshire Hathaway|N\n"
+        "File Creation Time: 0721202612:00||\n"
+    )
+
+    symbols = dashboard.parse_us_symbol_directory(content, "Symbol")
+
+    assert symbols == ["AAPL", "BRK-B"]
+
+
+def test_search_us_tickers_uses_big_tech_for_empty_search():
+    assert dashboard.search_us_tickers("") == dashboard.BIG_TECHS
+
+
+def test_search_us_tickers_returns_prefix_matches_from_full_directory(monkeypatch):
+    monkeypatch.setattr(
+        dashboard,
+        "load_us_ticker_directory",
+        lambda: ("A", "AAPL", "AMZN", "BA", "META"),
+    )
+
+    assert dashboard.search_us_tickers("a") == ["A", "AAPL", "AMZN"]
