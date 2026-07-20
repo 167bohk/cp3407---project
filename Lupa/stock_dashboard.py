@@ -1161,24 +1161,45 @@ def main():
     render_app_header(logo_path, "Lupa AI Stock Terminal")
 
     with st.sidebar:
+        st.markdown('<div class="sidebar-field-label">Ticker</div>', unsafe_allow_html=True)
         st_searchbox(
             search_us_tickers,
-            label="Ticker",
             key="ticker_search",
-            placeholder="Enter any ticker (e.g. AAPL)",
+            placeholder="Enter ticker (e.g. AAPL)",
             default_options=BIG_TECHS,
             edit_after_submit="option",
             submit_function=on_ticker_selected,
             debounce=200,
             style_overrides={
+                "wrapper": {
+                    "backgroundColor": theme["sidebar_bg"],
+                    "padding": 0,
+                    "margin": "0 0 16px 0",
+                },
+                "clear": {"clearable": "never"},
                 "searchbox": {
                     "control": {
                         "backgroundColor": theme["input_bg"],
-                        "borderColor": theme["grid_color"],
+                        "border": theme["input_border"],
+                        "borderRadius": "6px",
+                        "boxShadow": "none",
+                        "height": "48px",
+                        "minHeight": "48px",
+                        "&:hover": {"border": theme["input_border"]},
                     },
-                    "input": {"color": theme["text_color"]},
-                    "placeholder": {"color": theme["placeholder_color"]},
-                    "singleValue": {"color": theme["text_color"]},
+                    "input": {
+                        "color": theme["text_color"],
+                        "fontSize": "16px",
+                    },
+                    "placeholder": {
+                        "color": theme["placeholder_color"],
+                        "fontSize": "16px",
+                        "whiteSpace": "nowrap",
+                    },
+                    "singleValue": {
+                        "color": theme["text_color"],
+                        "fontSize": "16px",
+                    },
                     "menu": {"backgroundColor": theme["dropdown_bg"]},
                     "menuList": {"backgroundColor": theme["dropdown_bg"]},
                     "option": {
