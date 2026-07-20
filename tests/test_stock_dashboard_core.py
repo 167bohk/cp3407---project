@@ -217,3 +217,42 @@ def test_load_price_data_drops_rows_with_missing_close(monkeypatch):
 
     assert len(loaded) == 2
     assert loaded["Close"].iloc[-1] == 101.0
+
+
+def test_parse_custom_tickers_normalizes_deduplicates_and_rejects_invalid_values():
+    tickers, invalid = dashboard.parse_custom_tickers(" nflx, JPM nflx; bad/ticker ")
+
+    assert tickers == ["NFLX", "JPM"]
+    assert invalid == ["BAD/TICKER"]
+
+
+def test_build_heatmap_ticker_list_merges_big_tech_and_limits_size():
+    custom = ",".join(f"TEST{index}" for index in range(20))
+
+    tickers, invalid, omitted_count = dashboard.build_heatmap_ticker_list(custom)
+
+    assert tickers[:len(dashboard.BIG_TECHS)] == dashboard.BIG_TECHS
+    assert len(tickers) == dashboard.MAX_HEATMAP_TICKERS
+    assert invalid == []
+    assert omitted_count == 8
+
+
+def test_load_heatmap_data_calculates_changes_for_custom_tickers(monkeypatch):
+    dates = pd.date_range("2026-07-01", periods=3, freq="D")
+    batch_data = pd.concat(
+        {
+            "NFLX": pd.DataFrame({"Close": [100.0, 105.0, 110.0]}, index=dates),
+            "JPM": pd.DataFrame({"Close": [200.0, np.nan, 190.0]}, index=dates),
+        },
+        axis=1,
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "download_multi_ticker_history",
+        lambda tickers, period: batch_data,
+    )
+
+    result = dashboard.load_heatmap_data(("NFLX", "JPM"))
+
+    assert result["Ticker"].tolist() == ["NFLX", "JPM"]
+    assert result["Change"].tolist() == [10.0, -5.0]

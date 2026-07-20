@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from datetime import datetime, timedelta
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -49,6 +50,7 @@ finnhub_client = None
 openai_client = None
 
 BIG_TECHS = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "TSLA", "GOOGL", "AMD"]
+MAX_HEATMAP_TICKERS = 20
 PERIOD_OPTIONS = ["3mo", "6mo", "1y", "2y", "5y"]
 FORECAST_STATE_KEY = "forecast_result"
 US_MARKET_TZ = ZoneInfo("America/New_York")
@@ -1050,19 +1052,50 @@ def build_forecast_result(ticker, current_price, pred_price, llm_price, llm_conf
 
 # ---------- Tab data helpers ----------
 
-def load_heatmap_data():
-    batch_data = download_multi_ticker_history(tuple(BIG_TECHS), "5d")
+def parse_custom_tickers(raw_tickers):
+    tickers = []
+    invalid_tickers = []
+    for value in re.split(r"[\s,;]+", raw_tickers.strip().upper()):
+        if not value:
+            continue
+        if not re.fullmatch(r"[A-Z0-9^][A-Z0-9.^=\-]{0,14}", value):
+            invalid_tickers.append(value)
+        elif value not in tickers:
+            tickers.append(value)
+    return tickers, invalid_tickers
+
+
+def build_heatmap_ticker_list(raw_tickers, include_big_tech=True):
+    custom_tickers, invalid_tickers = parse_custom_tickers(raw_tickers)
+    tickers = list(BIG_TECHS) if include_big_tech else []
+    tickers.extend(ticker for ticker in custom_tickers if ticker not in tickers)
+    omitted_count = max(0, len(tickers) - MAX_HEATMAP_TICKERS)
+    return tickers[:MAX_HEATMAP_TICKERS], invalid_tickers, omitted_count
+
+
+def load_heatmap_data(tickers):
+    tickers = tuple(tickers)
+    if not tickers:
+        return pd.DataFrame(columns=["Ticker", "Change"])
+
+    batch_data = download_multi_ticker_history(tickers, "5d")
     if batch_data.empty:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=["Ticker", "Change"])
 
     rows = []
-    for ticker in BIG_TECHS:
+    for ticker in tickers:
         try:
             if isinstance(batch_data.columns, pd.MultiIndex):
-                ticker_frame = batch_data[ticker]
+                try:
+                    ticker_frame = batch_data[ticker]
+                except KeyError:
+                    ticker_frame = batch_data.xs(ticker, axis=1, level=-1)
                 close = coerce_series(ticker_frame["Close"])
             else:
                 close = coerce_series(batch_data["Close"])
+            close = pd.to_numeric(close, errors="coerce").dropna()
+            if len(close) < 2 or close.iloc[0] == 0:
+                continue
             change = (close.iloc[-1] - close.iloc[0]) / close.iloc[0] * 100
             rows.append({"Ticker": ticker, "Change": float(change)})
         except Exception:
@@ -1291,9 +1324,36 @@ def main():
                 render_value_card(title, value, signal_text, signal_color, theme, extra_text=extra_text)
 
     with tab_heat:
-        heatmap_df = load_heatmap_data()
+        control_col, toggle_col = st.columns([3, 1])
+        with control_col:
+            custom_heatmap_tickers = st.text_input(
+                "Custom stocks",
+                key="heatmap_custom_tickers",
+                placeholder="NFLX, JPM, 0700.HK",
+            )
+        with toggle_col:
+            include_big_tech = st.toggle("Include Big Tech", value=True)
+
+        heatmap_tickers, invalid_tickers, omitted_count = build_heatmap_ticker_list(
+            custom_heatmap_tickers,
+            include_big_tech,
+        )
+        if invalid_tickers:
+            st.warning(f"Invalid ticker format: {', '.join(invalid_tickers)}")
+        if omitted_count:
+            st.warning(f"Only the first {MAX_HEATMAP_TICKERS} tickers are shown.")
+
+        heatmap_df = load_heatmap_data(heatmap_tickers)
         if not heatmap_df.empty:
             st.plotly_chart(build_heatmap_chart(heatmap_df, theme), width="stretch")
+            unavailable_tickers = [
+                ticker for ticker in heatmap_tickers
+                if ticker not in set(heatmap_df["Ticker"])
+            ]
+            if unavailable_tickers:
+                st.caption(f"No recent price data: {', '.join(unavailable_tickers)}")
+        elif not heatmap_tickers:
+            st.info("Add at least one custom stock or include Big Tech.")
         else:
             st.info("Heatmap data is temporarily unavailable.")
 
