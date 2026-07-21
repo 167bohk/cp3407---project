@@ -53,6 +53,15 @@ BIG_TECHS = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "TSLA", "GOOGL", "AMD"]
 MAX_HEATMAP_TICKERS = 20
 PERIOD_OPTIONS = ["3mo", "6mo", "1y", "2y", "5y"]
 FORECAST_STATE_KEY = "forecast_result"
+VALUATION_STATE_KEY = "valuation_result"
+MAX_VALUATION_PEERS = 8
+VALUATION_METRICS = {
+    "trailing_pe": "Trailing P/E",
+    "forward_pe": "Forward P/E",
+    "price_to_book": "Price / Book",
+    "price_to_sales": "Price / Sales",
+    "enterprise_to_ebitda": "EV / EBITDA",
+}
 US_MARKET_TZ = ZoneInfo("America/New_York")
 FINBERT_MIN_AVAILABLE_MB = 900
 ENABLE_FINBERT_DEFAULT = False
@@ -95,6 +104,8 @@ def empty_prediction_log_df():
 
 def clear_forecast_state():
     st.session_state.pop(FORECAST_STATE_KEY, None)
+    st.session_state.pop(VALUATION_STATE_KEY, None)
+    st.session_state.pop("valuation_peers", None)
 
 
 def initialize_session_state():
@@ -1064,6 +1075,111 @@ def build_heatmap_ticker_list(raw_tickers, include_big_tech=True):
     return tickers[:MAX_HEATMAP_TICKERS], invalid_tickers, omitted_count
 
 
+def positive_finite_number(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(number) or number <= 0:
+        return None
+    return number
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_valuation_metrics(symbol):
+    try:
+        info = yf.Ticker(symbol).info or {}
+    except Exception as exc:
+        return {"ticker": symbol, "error": str(exc)}
+
+    return {
+        "ticker": symbol,
+        "current_price": positive_finite_number(
+            info.get("currentPrice") or info.get("regularMarketPrice")
+        ),
+        "trailing_pe": positive_finite_number(info.get("trailingPE")),
+        "forward_pe": positive_finite_number(info.get("forwardPE")),
+        "price_to_book": positive_finite_number(info.get("priceToBook")),
+        "price_to_sales": positive_finite_number(info.get("priceToSalesTrailing12Months")),
+        "enterprise_to_ebitda": positive_finite_number(info.get("enterpriseToEbitda")),
+        "earnings_growth": info.get("earningsGrowth"),
+        "sector": info.get("sector"),
+        "industry": info.get("industry"),
+    }
+
+
+def analyze_relative_valuation(company_metrics, peer_metrics):
+    comparisons = []
+    signals = []
+    implied_prices = []
+    current_price = positive_finite_number(company_metrics.get("current_price"))
+
+    for metric_key, metric_label in VALUATION_METRICS.items():
+        company_value = positive_finite_number(company_metrics.get(metric_key))
+        peer_values = [
+            value
+            for peer in peer_metrics
+            if (value := positive_finite_number(peer.get(metric_key))) is not None
+        ]
+        if company_value is None or len(peer_values) < 2:
+            continue
+
+        peer_median = float(np.median(peer_values))
+        ratio = company_value / peer_median
+        if ratio < 0.8:
+            signal = -1
+            signal_label = "Below peers"
+        elif ratio > 1.2:
+            signal = 1
+            signal_label = "Above peers"
+        else:
+            signal = 0
+            signal_label = "Near peers"
+
+        comparisons.append(
+            {
+                "Metric": metric_label,
+                "Company": company_value,
+                "Peer median": peer_median,
+                "Difference": (ratio - 1) * 100,
+                "Signal": signal_label,
+            }
+        )
+        signals.append(signal)
+        if current_price is not None:
+            implied_prices.append(current_price * peer_median / company_value)
+
+    if len(signals) < 3:
+        label = "Insufficient Data"
+        score = None
+    else:
+        score = float(np.mean(signals))
+        if score <= -0.35:
+            label = "Potentially Undervalued"
+        elif score >= 0.35:
+            label = "Potentially Overvalued"
+        else:
+            label = "Fairly Valued"
+
+    fair_value_low = None
+    fair_value_high = None
+    fair_value_mid = None
+    if implied_prices:
+        fair_value_low = float(np.percentile(implied_prices, 25))
+        fair_value_high = float(np.percentile(implied_prices, 75))
+        fair_value_mid = float(np.median(implied_prices))
+
+    return {
+        "label": label,
+        "score": score,
+        "valid_metric_count": len(signals),
+        "comparisons": comparisons,
+        "fair_value_low": fair_value_low,
+        "fair_value_high": fair_value_high,
+        "fair_value_mid": fair_value_mid,
+    }
+
+
 def load_heatmap_data(tickers):
     tickers = tuple(tickers)
     if not tickers:
@@ -1198,8 +1314,8 @@ def main():
                 """
             )
 
-    tab_chart, tab_ai, tab_almanac, tab_heat, tab_news = st.tabs(
-        ["Chart", "AI Forecast", "Almanac", "Heatmap", "News"]
+    tab_chart, tab_short_term, tab_valuation, tab_almanac, tab_heat, tab_news = st.tabs(
+        ["Chart", "Short-Term Forecast", "Valuation", "Almanac", "Heatmap", "News"]
     )
 
     with tab_chart:
@@ -1209,11 +1325,12 @@ def main():
             config={"scrollZoom": True},
         )
 
-    with tab_ai:
+    with tab_short_term:
         left_col, right_col = st.columns(2)
 
         with left_col:
-            st.subheader("XGBoost Prediction")
+            st.subheader("Short-Term Price Forecast")
+            st.caption(f'Prediction horizon: next US trading session ({target_context["target_date"]:%Y-%m-%d})')
             signal_text, signal_color = get_signal_style(pred_price, price)
             render_value_card("Predicted Price", pred_price, signal_text, signal_color, theme)
 
@@ -1321,6 +1438,96 @@ def main():
                 if title == "LLM Price":
                     extra_text = f'Confidence: {forecast_result["llm_conf"]:.0%}'
                 render_value_card(title, value, signal_text, signal_color, theme, extra_text=extra_text)
+
+    with tab_valuation:
+        st.subheader(f"{symbol} Valuation Analysis")
+        st.caption(
+            "Compare valuation multiples with similar companies. Use peers from the same industry for a more meaningful result."
+        )
+
+        default_peers = ", ".join(ticker for ticker in BIG_TECHS if ticker != symbol)
+        peer_input = st.text_input(
+            "Peer tickers",
+            value=default_peers,
+            key="valuation_peers",
+            placeholder="Enter peer tickers, separated by commas (e.g. MSFT, GOOGL, META)",
+        )
+        peer_tickers, invalid_peers = parse_custom_tickers(peer_input)
+        peer_tickers = [ticker for ticker in peer_tickers if ticker != symbol]
+        omitted_peers = max(0, len(peer_tickers) - MAX_VALUATION_PEERS)
+        peer_tickers = peer_tickers[:MAX_VALUATION_PEERS]
+
+        if invalid_peers:
+            st.warning(f"Invalid ticker format: {', '.join(invalid_peers)}")
+        if omitted_peers:
+            st.warning(f"Only the first {MAX_VALUATION_PEERS} peer tickers are used.")
+
+        if st.button("Run Valuation Analysis", key="valuation_button", type="primary"):
+            if len(peer_tickers) < 2:
+                st.error("Add at least two valid peer tickers.")
+            else:
+                with st.spinner("Loading company and peer valuation data..."):
+                    company_metrics = load_valuation_metrics(symbol)
+                    if company_metrics.get("current_price") is None:
+                        company_metrics["current_price"] = float(price)
+                    peer_metrics = [load_valuation_metrics(ticker) for ticker in peer_tickers]
+                    analysis = analyze_relative_valuation(company_metrics, peer_metrics)
+                    st.session_state[VALUATION_STATE_KEY] = {
+                        "ticker": symbol,
+                        "peers": peer_tickers,
+                        "company": company_metrics,
+                        "analysis": analysis,
+                    }
+
+        valuation_result = st.session_state.get(VALUATION_STATE_KEY)
+        if valuation_result and valuation_result.get("ticker") == symbol:
+            analysis = valuation_result["analysis"]
+            company_metrics = valuation_result["company"]
+            result_col, range_col, gap_col = st.columns(3)
+            result_col.metric("Valuation", analysis["label"])
+
+            if analysis["fair_value_low"] is not None:
+                range_col.metric(
+                    "Peer-Implied Fair Value",
+                    f'${analysis["fair_value_low"]:.2f} - ${analysis["fair_value_high"]:.2f}',
+                )
+                valuation_gap = (
+                    (company_metrics["current_price"] - analysis["fair_value_mid"])
+                    / analysis["fair_value_mid"]
+                )
+                gap_col.metric("Price vs Midpoint", f"{valuation_gap:+.1%}")
+            else:
+                range_col.metric("Peer-Implied Fair Value", "Unavailable")
+                gap_col.metric("Valid Metrics", analysis["valid_metric_count"])
+
+            if analysis["comparisons"]:
+                comparison_df = pd.DataFrame(analysis["comparisons"])
+                st.dataframe(
+                    comparison_df,
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "Company": st.column_config.NumberColumn(format="%.2f"),
+                        "Peer median": st.column_config.NumberColumn(format="%.2f"),
+                        "Difference": st.column_config.NumberColumn(format="%+.1f%%"),
+                    },
+                )
+            else:
+                st.info("Not enough comparable valuation data is available for these tickers.")
+
+            with st.expander("How This Valuation Is Calculated"):
+                st.markdown(
+                    """
+                    The result compares positive, available valuation multiples with the peer median.
+
+                    - More than 20% below peers: undervaluation signal
+                    - Within 20% of peers: neutral signal
+                    - More than 20% above peers: overvaluation signal
+                    - At least three valid metrics are required for a classification
+
+                    The fair-value range is implied by peer multiples and is not a price forecast or investment recommendation.
+                    """
+                )
 
     with tab_heat:
         control_col, toggle_col = st.columns([3, 1])
